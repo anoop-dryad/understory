@@ -1,2 +1,2 @@
 # understory
-A multi-user, access-controlled agentic support agent for wildfire-detection hardware — where authorization is structural, not prompted.
+Understory is a user-scoped AI agent that answers support questions about Dryad Silvanet devices and issues control commands to field hardware, with every action authenticated, authorized, and audited. It extends the canopy capstone with real user management, carrying forward one invariant: the LLM never holds authority — identity lives on the transport, authorization is enforced at the backend, and structure enforces what prompts only request.
