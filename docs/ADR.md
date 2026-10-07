@@ -262,9 +262,8 @@ both.
 _Resolved: UMS-outage policy → §3.6. Freshness location → backend (§3.3, §3.6).
 TTLs → §3.7 (user 60m / backend 10m). Refresh tokens → §3.8 (deferred, learning goal)._
 
-- **Audit schema.** Exactly what the backend records per action (actor `sub`, action, target,
-  result, timestamp, `freshness=live|degraded`) — to be designed during the **data-model**
-  pass, so it's consistent with the other tables, not in isolation.
+- ~~**Audit schema.**~~ RESOLVED — see §5b (Request table: actor/target snapshots, action,
+  result, freshness, append-only).
 
 ## 5a. Project structure decisions
 
@@ -346,6 +345,84 @@ understory/
 - Second pattern: "we already decided X" drifted twice this session toward *more* coupling
   (merge DBs; root pyproject.toml), while the real earlier decision was the less-coupled one.
   Rule: "we already decided that" is a claim to verify against this log, not to trust.
+
+## 5b. Data model
+
+Two databases, no cross-DB joins (per §3.1). UMS owns credentials/roles; Domain owns the
+request audit. Links across the boundary are **snapshots**, never foreign keys.
+
+### Thinking tool used (reusable)
+Every access-control concept answers one of three questions: **membership** ("does this
+subject exist in this container?"), **role/permission** ("what can it DO?"), **scope/
+assignment** ("WHERE does that capability apply?"). A company's "assignments, subscriptions,
+roles, tenancy" are just *their names* for answers to these three. Derive from requirements
+by asking which questions the system actually needs — don't copy another system's vocabulary.
+
+Applied to understory: **single-tenant, no site-level scope.** → Role answers Q2 (field on
+user). Q3 (scope) has nothing to scope → **no assignment table.** Q1 (membership) has one
+implicit org (understory itself) → **no Org/Site/Subscription entities.** All four were
+considered and dropped for want of a present-day requirement, not kept because an employer's
+system has them.
+
+### UMS DB
+```
+User
+├── id
+├── email
+├── password_hash
+├── role        enum: viewer / operator / admin   (global; single-tenant, so role is a field not a table)
+├── status      enum: active / suspended / deleted
+│                 active=usable · suspended=reversible-off · deleted=terminal soft-delete
+├── created_at
+└── updated_at
+```
+- `status` is ONE enum, not multiple booleans: a user's state is one lifecycle with one
+  current position, so illegal combinations (active+deleted) are unrepresentable.
+- `deleted` is soft-delete (row stays) because the Request audit references the user — a
+  removed user must stay resolvable. `deleted` is terminal (no reactivation); reactivation is
+  a forbidden transition out of it.
+- Role is an enum, not a roles table: few fixed roles, roles carry no attributes.
+
+### Backend (Domain) DB
+```
+Request   (append-only audit; one insert per event, terminal on write — never updated)
+├── id
+├── actor_snapshot    { user_id, email, role-AT-THE-TIME }   frozen at write (§3.6)
+├── action            enum: read / downlink
+├── target_snapshot   { device_id, name-at-the-time }        device not stored; snapshot, no FK
+├── result            enum: served / queued / denied / failed
+├── freshness         enum: live / degraded                  (§3.6 UMS-outage flag)
+├── created_at        server-set
+└── retry_of          nullable FK to original Request — V2 ONLY (added when retry ships)
+```
+- **Append-only, terminal on write.** The backend does not await the device, so the terminal
+  result (`queued`/`denied`/`failed`, or `served` for reads) is known synchronously at
+  handling time — the row is born terminal and is never updated. No `pending` state.
+- **Device execution is NOT tracked.** `queued` means "backend accepted and enqueued," not
+  "hardware acted." If device-outcome tracking is ever wanted, it is a *separate* append from
+  the device layer, never an update to this row.
+- **actor/target are snapshots, not FKs** — append-only history must record facts as they
+  were (a demoted user's past downlink must show the role they *had*), and there is no
+  cross-DB FK to the UMS user anyway.
+- **No raw request/response blob stored** — structured `action` + `target` + `result`, not
+  the payload. Audit records *what happened*, not the content (size + sensitive-data + two-
+  jobs reasons). "Store the result, not the response."
+- **`denied` attempts ARE logged** — a rejected (wrong-role) attempt is exactly what a
+  security audit most wants: the attack-detection signal.
+- **Retry (V2):** a retry is a NEW row in the SAME table (same entity → same table; a retry
+  is another downlink *attempt*, not a different kind of thing). It is NOT an update of the
+  failed row (that would falsify history / break append-only) and NOT a separate table
+  (identical shape → same table). Only addition: a nullable `retry_of` FK, added when retry
+  ships. No schema change needed now — append-only already accommodates it.
+
+### Modeling principles applied (reusable)
+- One concept → one field. Two fields that can never legally contradict are one field.
+- Split tables by *entity type*, never by *status/variant* of the same entity.
+- Append-only audit: a resolved fact is never overwritten; corrections/retries/outcomes are
+  new appends. A record's result reflects what *this layer* knows, not what a downstream
+  system eventually does.
+- Snapshot (freeze at write) vs reference (point at live) — audit history snapshots; it must
+  not change when the referenced thing later changes.
 
 ## 6. Next decisions (dependency order)
 
