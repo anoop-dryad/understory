@@ -24,25 +24,25 @@ layer assumed to be behind no attacker. Every other check is a fail-fast courtes
 ## 1. Component view
 
 ```
-   ┌────────────────┐        ┌────────────────┐        ┌────────────────┐
-   │  Streamlit UI  │        │   MCP Client   │        │   MCP Server   │
+   ┌────────────────┐        ┌────────────────┐         ┌────────────────┐
+   │  Streamlit UI  │        │   MCP Client   │         │   MCP Server   │
    │  (untrusted    │  chat  │  (agent brain, │  MCP /  │  (OAuth        │
    │   edge)        │───────▶│   Gemini ReAct)│  HTTP   │   resource     │
    │  login/logout  │        │                │────────▶│   server)      │
    │  role-aware UI │        │  LLM never     │ Bearer  │  verifies aud, │
    └───────┬────────┘        │  sees token    │ on hdr  │  sig, roles    │
            │                 └────────────────┘         └───────┬────────┘
-           │ user JWT (aud=mcp)                                  │ OBO exchange
-           ▼                                                     │ (per session,
-   ┌────────────────┐                                            │  cached 10m)
-   │      UMS        │◀───────────────────────────────────────────┘
-   │  authN + authZ  │   mint aud=mcp @login · exchange→aud=backend
-   │  ┌───────────┐  │   live freshness check on writes
-   │  │  UMS DB   │  │                                            │ token
-   │  │ creds,    │  │                                    aud=backend,
-   │  │ roles     │  │                                    sub + roles
-   │  └───────────┘  │                                            ▼
-   └────────────────┘                                   ┌────────────────┐
+           │ user JWT (aud=mcp)                                 │ OBO exchange
+           ▼                                                    │ (per session,
+    ┌────────────────┐                                          │ cached 10m)
+    │      UMS       │◀─────────────────────────────────────────┘
+    │  authN + authZ │ mint aud=mcp @login·exchange→aud=backend │
+    │  ┌───────────┐ │   live freshness check on writes         │
+    │  │  UMS DB   │ │                                          │ token
+    │  │ creds,    │ │                                          │ aud=backend,
+    │  │ roles     │ │                                          │ sub + roles
+    │  └───────────┘ │                                          ▼
+    └────────────────┘                                   ┌────────────────┐
                                                          │    Backend     │
                                                          │  ENFORCEMENT   │
                                                          │  validates     │
@@ -65,32 +65,60 @@ clean credential/domain boundary.
 
 ---
 
-## 2. The auth spine — a downlink request end to end
+## 2. The auth spine — a downlink request authorization sequence
 
+```mermaid
+
+sequenceDiagram
+    autonumber
+    actor U as User
+    participant UI as UI
+    participant C as MCP Client
+    participant M as MCP Server
+    participant A as UMS
+    participant B as Backend
+
+    U->>UI: login
+    UI->>A: authenticate
+    A-->>UI: user JWT [aud=mcp, sub, roles]
+
+    U->>UI: reset dev-3
+    UI->>C: chat
+    C->>M: tool call with JWT on header
+    Note over M: OFFLINE verify sig and aud=mcp
+    Note over M: OFFLINE basic-rights gatedoes token role allow downlink
+    alt role lacks downlink
+        M-->>UI: denied, no confirm shown
+    else role allows
+        M-->>UI: confirm [propose, UI only, no backend call]
+        U->>UI: click Confirm
+        UI->>C: send
+        C->>M: send_downlink
+        opt OBO token cold [else reuse cached 10m]
+            M->>A: OBO exchange, user JWT to aud=backend
+            A-->>M: aud=backend token [carries sub and roles]
+        end
+        M->>B: send_downlink with aud=backend token
+        B->>A: live freshness, role still valid
+        A-->>B: valid or revoked
+        Note over B: validate aud and role,enqueue, write audit
+        B-->>UI: queued or denied
+    end
+    
 ```
-User     UI        MCP Client    MCP Server        UMS           Backend
- │ login  │            │             │              │              │
- │───────▶│──────────────── authenticate ──────────▶│              │
- │        │◀──────── user JWT (aud=mcp, sub, roles) ─│              │
- │"reset  │            │             │              │              │
- │ dev-3" │── chat ───▶│             │              │              │
- │        │            │ JWT on Authorization header │              │
- │        │            │ (LLM never sees it) ───────▶│              │
- │        │            │             │ verify sig + aud=mcp + role  │
- │        │            │             │── OBO exchange ▶│            │
- │        │            │             │  (1st call/session,         │
- │        │            │             │   cached 10m)   │            │
- │        │            │             │◀── aud=backend token ───────│
- │        │            │             │── WRITE? live freshness ───▶│
- │        │            │             │◀── role still valid? ───────│
- │        │◀── confirm? ─────────────│  propose (no send)          │
- │ click  │            │             │              │              │
- │Confirm │── send ───▶│── send_downlink ──────────────────────────▶│
- │        │            │             │              │ validate aud,│
- │        │            │             │              │ role, enqueue│
- │        │            │             │              │ write audit  │
- │        │◀─────────────────── queued ───────────────────────────│
-```
+
+## Two gates, two stages, two questions
+
+- **Stage A — basic-rights gate** (MCP server, **offline**, pre-confirm): "May this *kind* of user ever send downlinks?" Read from the token. Stops a viewer before any confirm UI.
+- **Stage B — freshness check** (backend, **live UMS**, at send): "Is *this* user's role still valid right now?" Catches a mid-session demotion just before hardware.
+
+## UMS is called only where live authority is needed
+
+- **Token validation + basic-rights gate** — offline, from the verified token. No UMS call.
+- **OBO exchange** — UMS call, cached per session (10 min); only on the first write of a session.
+- **Freshness check** — UMS call, per write, at the backend, last stage before enqueue.
+
+Per write: freshness always; OBO only if the cache is cold.
 
 **Why each link is load-bearing**
 
