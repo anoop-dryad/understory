@@ -162,7 +162,7 @@ it wrong). Nothing here is "clean" — every choice costs something, named on pu
 - **Falsifier:** If identity ever rides as a tool arg the model fills in, the agent is back
   in the auth path and the thesis collapses.
 
-### 3.3 No token pass-through _(spec-confirmed)_
+### 3.3 No token pass-through
 - **Choice:** MCP server does **not** forward the user's token downstream; it obtains a
   separate `aud=backend` token via OBO exchange that still carries `sub` + roles.
 - **Why:** MCP spec (2026-07-28): a server MUST NOT transit a foreign-audience token
@@ -170,10 +170,6 @@ it wrong). Nothing here is "clean" — every choice costs something, named on pu
 - **Trade:** An exchange step and a token-minting dependency on the UMS.
 - **Falsifier:** If the backend ever accepts an `aud=mcp` token, audience binding is broken
   and any service's token works anywhere.
-- **⚠ Recorded wrong turn:** the mentor first recommended plain pass-through on YAGNI/latency
-  grounds. That was **wrong** — the spec forbids it. Caught by reading the dated MCP spec
-  directly rather than trusting recall. The falsified entry stays: it's proof the process
-  works, not just the outcome.
 
 ### 3.4 Downstream token minting & caching
 - **Choice:** MCP server mints the `aud=backend` token server-side via OBO exchange; cached
@@ -194,7 +190,7 @@ it wrong). Nothing here is "clean" — every choice costs something, named on pu
   only on the rare, dangerous action — simple, fails closed, cost paid on <1% of calls.
 - **Trade:** A UMS hop on every write. Accepted because writes are rare and safety-critical;
   reads stay cache-fast.
-- **Falsifier (closed):** Fired operator at 14:00, cached token valid to 14:02, fires a
+- **Falsifier:** Fired operator at 14:00, cached token valid to 14:02, fires a
   downlink at 14:01 → write path's live freshness check sees role revoked → rejected. The
   stale window never reaches hardware because the write path doesn't trust the cache.
 
@@ -215,9 +211,9 @@ it wrong). Nothing here is "clean" — every choice costs something, named on pu
   load-bearing — but because the **failure costs are asymmetric for a fire-detection system.**
   Blocking writes during an auth outage means operators cannot command wildfire hardware;
   allowing a valid token's write means a user demoted *during* the outage keeps their role
-  for ≤ the token TTL. For Dryad, losing hardware control is the worse failure, so we accept
-  the bounded staleness. (Reads have no such tension — identity alone suffices, so they just
-  allow.)
+  for ≤ the token TTL. For Critical Systems, losing hardware control is the worse failure,
+  so we accept the bounded staleness. (Reads have no such tension — identity alone suffices,
+  so they just allow.)
 - **Guardrails (required for this to be defensible):** (1) write-token TTL short, so
   "bounded-stale" is genuinely bounded; (2) every degraded-mode downlink is audited with
   `freshness=degraded, reason=ums_unavailable`, so the window is recoverable when UMS returns.
@@ -226,9 +222,6 @@ it wrong). Nothing here is "clean" — every choice costs something, named on pu
 - **Falsifier:** "Identity is checkable offline" — if token validation ever required a live
   UMS call, a UMS outage would black out identity too, and degrade-open would be waving
   through unverifiable (possibly forged) tokens. It must stay offline-verifiable.
-- **Note on framing:** avoid the word "priority" here. Writes aren't "higher priority" than
-  reads — they have a different, opposite failure cost during an outage. Priority would
-  imply more protection; this is about failure-cost asymmetry.
 
 ### 3.7 Token TTLs — two tokens, two problems
 - **Choice:** User JWT (`aud=mcp`, browser session) = **60 min**. Backend token
@@ -245,8 +238,7 @@ it wrong). Nothing here is "clean" — every choice costs something, named on pu
   would be unacceptable.
 
 ### 3.8 Refresh tokens — deferred to end of v1 _(explicit learning goal)_
-- **Choice:** No refresh tokens in v1. Revisit at the end, deliberately, as a topic to learn
-  properly rather than copy-paste.
+- **Choice:** No refresh tokens in v1.
 - **Why defer:** refresh tokens are the standard way to get *both* rare logins (long refresh
   token) and a small theft window (short access token) — they dissolve the UX-vs-security
   tension in 3.7. But they add machinery (refresh endpoint, rotation, reuse-detection,
@@ -287,12 +279,6 @@ both.
 
 ## 5. Open questions / not yet decided
 
-_Resolved: UMS-outage policy → §3.6. Freshness location → backend (§3.3, §3.6).
-TTLs → §3.7 (user 60m / backend 10m). Refresh tokens → §3.8 (deferred, learning goal)._
-
-- ~~**Audit schema.**~~ RESOLVED — see §5b (Request table: actor/target snapshots, action,
-  result, freshness, append-only).
-
 ## 5a. Project structure decisions
 
 Project name: **understory** — the forest layer beneath the canopy that governs what gets
@@ -330,7 +316,7 @@ through; successor to the `canopy` capstone. (Lineage goes in the description, n
 - **Trade:** the dev venv *could* resolve a forbidden import at runtime; the linter is what
   makes it fail. If the linter isn't run, the boundary isn't enforced.
 - **Falsifier:** justifying isolation by "switch a service to another language later" is
-  requirement-laundering — polyglot was rejected in 5a.1. The real justification is
+  requirement-laundering. The real justification is
   present-day boundary protection, not future swappability.
 
 ### 5a.4 library vs contracts — two different shared things
@@ -367,11 +353,15 @@ understory/
 
 ### 5a.6 Meta-lesson (for the engineer, not the architecture)
 - Failure mode named: reaching for "fancy" techniques heard elsewhere and building for
-  imagined futures. Fix is a three-question test before adding any complexity: (1) what breaks
-  *today* without it? (2) can it be added later without a rewrite? (3) am I reaching for this
-  because the problem needs it, or because I want to use it? If (1) = "nothing," stop.
-- Second pattern: "we already decided X" drifted twice this session toward *more* coupling
-  (merge DBs; root pyproject.toml), while the real earlier decision was the less-coupled one.
+  imagined futures. Fix is a three-question test before adding any complexity:
+  
+  (1) what breaks *today* without it?
+  (2) can it be added later without a rewrite?
+  (3) am I reaching for this because the problem needs it, or because I want to use it?
+  
+  If (1) = "nothing," stop.
+  
+- Second pattern: "we already decided X" All decisions should be loged for future reference.
   Rule: "we already decided that" is a claim to verify against this log, not to trust.
 
 ## 5b. Data model
@@ -380,17 +370,21 @@ Two databases, no cross-DB joins (per §3.1). UMS owns credentials/roles; Domain
 request audit. Links across the boundary are **snapshots**, never foreign keys.
 
 ### Thinking tool used (reusable)
-Every access-control concept answers one of three questions: **membership** ("does this
-subject exist in this container?"), **role/permission** ("what can it DO?"), **scope/
-assignment** ("WHERE does that capability apply?"). A company's "assignments, subscriptions,
-roles, tenancy" are just *their names* for answers to these three. Derive from requirements
-by asking which questions the system actually needs — don't copy another system's vocabulary.
+Every access-control concept answers one of three questions: 
 
-Applied to understory: **single-tenant, no site-level scope.** → Role answers Q2 (field on
-user). Q3 (scope) has nothing to scope → **no assignment table.** Q1 (membership) has one
-implicit org (understory itself) → **no Org/Site/Subscription entities.** All four were
-considered and dropped for want of a present-day requirement, not kept because an employer's
-system has them.
+**membership** ("does this subject exist in this container?"), 
+**role/permission** ("what can it DO?"), 
+**scope/assignment** ("WHERE does that capability apply?"). 
+
+A company's "assignments, subscriptions, roles, tenancy" are just *their names* 
+for answers to these three. Derive from requirements by asking which questions 
+the system actually needs — don't copy another system's vocabulary.
+
+Applied to understory: 
+
+**single-tenant, no site-level scope.** → Role answers Q2 (field on user). 
+Q3 (scope) has nothing to scope → **no assignment table.** 
+Q1 (membership) has one implicit org (understory itself) → **no Org/Site/Subscription entities.** 
 
 ### UMS DB
 ```
@@ -454,12 +448,9 @@ Request   (append-only audit; one insert per event, terminal on write — never 
 
 ## 6. Next decisions (dependency order)
 
-1. **Data model** — both DBs. UMS: users, roles. Domain: devices, downlinks, audit (the
-   parked audit schema gets designed here). First, because tools and agent both depend on
-   the shapes.
-2. **MCP server internals** — tool contracts; how the canopy gate pattern carries over.
-3. **Agent loop** — reuse the canopy ReAct client, or rethink.
-4. **Refresh tokens** (§3.8) — end of v1, as a learning stop.
+1. **MCP server internals** — tool contracts; how the canopy gate pattern carries over.
+2. **Agent loop** — reuse the canopy ReAct client, or rethink.
+3. **Refresh tokens** (§3.8) — end of v1.
 - **Session termination on firing.** Does firing a user also kill their active UI session?
   If yes, the stale-window risk shrinks further.
 - **TTL by action class.** 10 min confirmed fine for reads and (via the freshness check) for
@@ -467,5 +458,4 @@ Request   (append-only audit; one insert per event, terminal on write — never 
 
 ---
 
-*Reference architecture derived from the design sessions. Every decision is the engineer's
-own, pressure-tested against its trade-off and falsifier.*
+*Every architecture decision is pressure-tested against its trade-off and falsifier.*
